@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import Fuse from "fuse.js"
 import { fetchSurah, type SurahData } from "@/services/QuranAPI"
+import { HybridSearchEngine } from "@/services/hybrid-search"
 import Header from "@/components/header"
 import NavigationButtons from "@/components/NavigationButtons"
 import AyatCard from "@/components/AyatCard"
@@ -35,6 +36,7 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [showSearchResults, setShowSearchResults] = useState(false)
   const [allSurahData, setAllSurahData] = useState<Map<number, SurahData>>(new Map())
+  const [hybridSearchEngine, setHybridSearchEngine] = useState<HybridSearchEngine | null>(null)
 
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -49,6 +51,9 @@ export default function App() {
         const num = surahNumber ? Number.parseInt(surahNumber) : 67
         const data = await fetchSurah(num)
         setTafsirData(data)
+
+        const hybridEngine = new HybridSearchEngine(data.verses)
+        setHybridSearchEngine(hybridEngine)
 
         const targetAyat = sessionStorage.getItem("targetAyat")
         if (targetAyat) {
@@ -79,12 +84,10 @@ export default function App() {
     const verseNumberMatch = term.match(/^(\d+)[:\s]+(\d+)$/)
     const singleVerseMatch = term.match(/^(\d+)$/)
 
-    // Handle "Surah:Ayat" format (e.g., "2:255")
     if (verseNumberMatch) {
       const surahNum = Number.parseInt(verseNumberMatch[1])
       const ayatNum = Number.parseInt(verseNumberMatch[2])
 
-      // Validate surah and ayat numbers
       if (surahNum < 1 || surahNum > 114) {
         alert("❌ Nomor Surah harus antara 1-114")
         return
@@ -95,7 +98,6 @@ export default function App() {
         return
       }
 
-      // Check if the verse exists in current surah
       if (tafsirData && surahNum === tafsirData.number) {
         const verse = tafsirData.verses.find((v) => v.id === ayatNum)
         if (verse) {
@@ -108,10 +110,8 @@ export default function App() {
           return
         }
       } else {
-        // Navigate to the surah first
         alert(`📖 Membuka Surah ${surahNum}, Ayat ${ayatNum}...`)
         navigate(`/surah/${surahNum}`)
-        // Store in sessionStorage to retrieve after navigation
         sessionStorage.setItem("targetAyat", ayatNum.toString())
         return
       }
@@ -154,34 +154,17 @@ export default function App() {
 
     const results: SearchResult[] = []
 
-    // Search in current surah first
-    if (tafsirData) {
-      const fuseOptions = hasArabic
-        ? {
-            keys: [{ name: "arab", weight: 2 }, "latin", "terjemahan"],
-            threshold: 0.1, // lowered threshold from 0.2 to 0.1 for better matching
-            includeScore: true,
-            ignoreLocation: true,
-            minMatchCharLength: 1, // lowered from 2 to 1 to catch single character matches
-          }
-        : {
-            keys: ["terjemahan", "latin", "tafsir"],
-            threshold: 0.2, // lowered threshold from 0.3 to 0.2
-            includeScore: true,
-            ignoreLocation: true,
-          }
+    if (tafsirData && hybridSearchEngine) {
+      console.log("[v0] Using hybrid search engine for query:", cleanTerm)
+      const hybridResults = hybridSearchEngine.search(cleanTerm, 50)
 
-      const fuse = new Fuse(tafsirData.verses, fuseOptions)
-      const fuseResults = fuse.search(cleanTerm)
-
-      fuseResults.forEach((result) => {
-        const matchCount = countMatches(result.item, cleanTerm, hasArabic)
-        if (matchCount > 0) {
+      hybridResults.forEach((result) => {
+        if (result.hybridScore >= 0.4) {
           results.push({
-            ayat: result.item,
+            ayat: result,
             surahNumber: tafsirData.number,
             surahName: tafsirData.name.short,
-            matchCount,
+            matchCount: 1,
             matchType: "arab",
             searchLanguage: hasArabic ? "arab" : "indonesia",
           })
@@ -190,29 +173,64 @@ export default function App() {
     }
 
     if (results.length === 0 && tafsirData) {
-      console.log("[v0] Fuse search returned no results, trying fallback substring search")
+      console.log("[v0] Hybrid search returned no results, trying Fuse.js fallback")
+      const fuseOptions = hasArabic
+        ? {
+            keys: [{ name: "arab", weight: 2 }, "latin", "terjemahan"],
+            threshold: 0.25,
+            includeScore: true,
+            ignoreLocation: true,
+            minMatchCharLength: 2,
+          }
+        : {
+            keys: ["terjemahan", "latin", "tafsir"],
+            threshold: 0.3,
+            includeScore: true,
+            ignoreLocation: true,
+            minMatchCharLength: 2,
+          }
+
+      const fuse = new Fuse(tafsirData.verses, fuseOptions)
+      const fuseResults = fuse.search(cleanTerm)
+
+      fuseResults.forEach((result) => {
+        const score = result.score || 1
+        if (score <= 0.3) {
+          const matchCount = countMatches(result.item, cleanTerm, hasArabic)
+          if (matchCount > 0) {
+            results.push({
+              ayat: result.item,
+              surahNumber: tafsirData.number,
+              surahName: tafsirData.name.short,
+              matchCount,
+              matchType: "arab",
+              searchLanguage: hasArabic ? "arab" : "indonesia",
+            })
+          }
+        }
+      })
+    }
+
+    if (results.length === 0 && tafsirData) {
+      console.log("[v0] Fuse search returned no results, trying substring fallback")
       tafsirData.verses.forEach((ayat) => {
         let found = false
         let matchCount = 0
 
         if (hasArabic) {
-          // For Arabic, do substring matching
           const arabicNormalized = ayat.arab.normalize("NFKC")
           const termNormalized = cleanTerm.normalize("NFKC")
 
-          // Remove diacritics for matching
           const arabicClean = arabicNormalized.replace(/[\u064B-\u065F]/g, "")
           const termClean = termNormalized.replace(/[\u064B-\u065F]/g, "")
 
-          if (arabicClean.includes(termClean)) {
+          if (termClean.length >= 3 && arabicClean.includes(termClean)) {
             found = true
-            // Count occurrences
             const regex = new RegExp(termClean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")
             const matches = arabicClean.match(regex)
             matchCount = matches ? matches.length : 1
           }
         } else {
-          // For Indonesian, do case-insensitive word boundary matching
           const text = (ayat.terjemahan + " " + ayat.latin + " " + (ayat.tafsir || "")).toLowerCase()
           const regex = new RegExp(`\\b${cleanTerm.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g")
           const matches = text.match(regex)
@@ -234,6 +252,8 @@ export default function App() {
         }
       })
     }
+
+    results.sort((a, b) => b.matchCount - a.matchCount)
 
     setSearchResults(results)
     setShowSearchResults(true)
@@ -276,7 +296,6 @@ export default function App() {
         .normalize("NFKC")
     }
 
-    // This ensures results are found even if Fuse threshold is too high
     console.log("[v0] Performing search for:", cleanTerm, "isRecitation:", isRecitation)
     performGlobalSearch(term)
     setSearchText(term)
@@ -333,10 +352,8 @@ export default function App() {
           </Button>
         </div>
 
-        {/* Header Surah */}
         <Header name={tafsirData?.name.long} transliteration={tafsirData?.name.transliteration.id} />
 
-        {/* Unified Search Bar with Smart Voice Detection */}
         <UnifiedSearchBar
           searchText={searchText}
           setSearchText={setSearchText}
@@ -352,7 +369,6 @@ export default function App() {
           onSelectResult={handleSelectSearchResult}
         />
 
-        {/* Navigasi antar ayat */}
         <NavigationButtons
           current={currentAyat}
           total={tafsirData.verses.length}
@@ -360,7 +376,6 @@ export default function App() {
           onNext={() => setCurrentAyat((c) => Math.min(tafsirData.verses.length, c + 1))}
         />
 
-        {/* Kartu Ayat */}
         {currentTafsir && tafsirData && (
           <AyatCard
             {...currentTafsir}
@@ -371,10 +386,8 @@ export default function App() {
           />
         )}
 
-        {/* Pagination */}
         <AyatPagination total={tafsirData.verses.length} current={currentAyat} onSelect={setCurrentAyat} />
 
-        {/* Footer */}
         <Footer name={tafsirData?.name.short} transliteration={tafsirData?.name.transliteration.id} />
       </div>
     </div>

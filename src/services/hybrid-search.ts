@@ -20,42 +20,36 @@ export interface HybridSearchConfig {
 }
 
 export const DEFAULT_HYBRID_CONFIG: HybridSearchConfig = {
-  bm25Weight: 0.5,
-  semanticWeight: 0.5,
-  minBM25Threshold: 0.05, // Much lower threshold for Arabic text
-  minSemanticThreshold: 0.2, // Lower threshold for semantic matching
+  bm25Weight: 0.6,
+  semanticWeight: 0.4,
+  minBM25Threshold: 0.01,
+  minSemanticThreshold: 0.1,
 }
 
 function normalizeArabicText(text: string): string {
   if (!text) return ""
 
-  // Remove diacritics (harakat)
   let normalized = text.normalize("NFKD")
-  normalized = normalized.replace(/[\u064B-\u065F]/g, "") // Remove Arabic diacritics
-  normalized = normalized.replace(/[\u0640]/g, "") // Remove Tatweel
-
-  // Remove extra spaces
+  normalized = normalized.replace(/[\u064B-\u065F]/g, "")
+  normalized = normalized.replace(/[\u0640]/g, "")
   normalized = normalized.replace(/\s+/g, " ").trim()
 
-  // Comprehensive Arabic letter normalization
-  const arabicNormalizationMap: { [key: string]: string } = {
-    // Alef variations
+  const arabicNormalizationMap: Record<string, string> = {
     ا: "ا",
     أ: "ا",
     إ: "ا",
     آ: "ا",
-    // Ya variations
     ى: "ي",
     ئ: "ي",
-    // Ha variations
     ة: "ه",
     ه: "ه",
-    // Hamza variations
     ء: "",
-    // Waw variations
     و: "و",
-    // Additional normalizations for better matching
     ؤ: "و",
+    ﻻ: "لا",
+    ﻼ: "لا",
+    ﻹ: "لا",
+    ﻺ: "لا",
   }
 
   let result = ""
@@ -66,49 +60,65 @@ function normalizeArabicText(text: string): string {
   return result
 }
 
-export class BM25Search {
-  private fuse: Fuse<any>
-  private documents: any[]
-  private normalizedDocs: any[]
+function levenshteinDistance(str1: string, str2: string): number {
+  const len1 = str1.length
+  const len2 = str2.length
+  const matrix: number[][] = Array(len2 + 1)
+    .fill(null)
+    .map(() => Array(len1 + 1).fill(0))
 
-  constructor(documents: any[]) {
+  for (let i = 0; i <= len1; i++) matrix[0][i] = i
+  for (let j = 0; j <= len2; j++) matrix[j][0] = j
+
+  for (let j = 1; j <= len2; j++) {
+    for (let i = 1; i <= len1; i++) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1
+      matrix[j][i] = Math.min(matrix[j][i - 1] + 1, matrix[j - 1][i] + 1, matrix[j - 1][i - 1] + indicator)
+    }
+  }
+
+  return matrix[len2][len1]
+}
+
+export class BM25Search {
+  private fuse: Fuse<Record<string, any>>
+  private documents: Array<Record<string, any>>
+  private normalizedDocs: Array<Record<string, any>>
+
+  constructor(documents: Array<Record<string, any>>) {
     this.documents = documents
 
     this.normalizedDocs = documents.map((doc) => ({
       ...doc,
-      arab_normalized: normalizeArabicText(doc.arab),
-      latin_normalized: doc.latin.toLowerCase(),
-      terjemahan_normalized: doc.terjemahan.toLowerCase(),
+      arab_normalized: normalizeArabicText(doc.arab || ""),
+      latin_normalized: (doc.latin || "").toLowerCase(),
+      terjemahan_normalized: (doc.terjemahan || "").toLowerCase(),
     }))
 
     this.fuse = new Fuse(this.normalizedDocs, {
       keys: [
-        { name: "arab_normalized", weight: 0.6 }, // Highest weight for Arabic text
-        { name: "latin_normalized", weight: 0.2 },
-        { name: "terjemahan_normalized", weight: 0.15 },
+        { name: "arab_normalized", weight: 0.8 },
+        { name: "latin_normalized", weight: 0.1 },
+        { name: "terjemahan_normalized", weight: 0.05 },
         { name: "tafsir", weight: 0.05 },
       ],
-      threshold: 0.15, // Lower threshold for better recall
+      threshold: 0.3,
       includeScore: true,
       ignoreLocation: true,
-      minMatchCharLength: 1,
-      useExtendedSearch: true,
+      minMatchCharLength: 2,
+      useExtendedSearch: false,
       shouldSort: true,
     })
   }
 
-  search(query: string): Array<{ item: any; score: number }> {
+  search(query: string): Array<{ item: Record<string, any>; score: number }> {
     const normalizedQuery = normalizeArabicText(query)
 
     let results = this.fuse.search(normalizedQuery)
 
-    if (results.length === 0 && normalizedQuery.length > 1) {
-      // Try partial matching with different substring lengths
-      for (let len = Math.ceil(normalizedQuery.length / 2); len >= 2; len--) {
-        const partialQuery = normalizedQuery.substring(0, len)
-        results = this.fuse.search(partialQuery)
-        if (results.length > 0) break
-      }
+    if (results.length === 0 && normalizedQuery.length > 3) {
+      const partialQuery = normalizedQuery.substring(0, Math.ceil(normalizedQuery.length * 0.7))
+      results = this.fuse.search(partialQuery)
     }
 
     return results.map((result) => ({
@@ -131,21 +141,18 @@ export class SentenceBERTEmbedding {
     const vector = new Array(384).fill(0)
     const words = normalized.split(/\s+/).filter((w) => w.length > 0)
 
-    // Process each word with position and length weighting
     for (let i = 0; i < words.length; i++) {
       const word = words[i]
-      const wordWeight = 1 / (i + 1) // Earlier words have higher weight
+      const wordWeight = 1 / Math.log(i + 2)
 
       for (let j = 0; j < word.length; j++) {
         const charCode = word.charCodeAt(j)
-        // Better distribution across vector space
         const index = (charCode * 7 + i * 31 + j * 13) % 384
-        const charWeight = 1 / (j + 1) // Earlier characters in word have higher weight
+        const charWeight = 1 / (j + 1)
         vector[index] += wordWeight * charWeight
       }
     }
 
-    // Add word frequency information
     const wordFreq = new Map<string, number>()
     for (const word of words) {
       wordFreq.set(word, (wordFreq.get(word) || 0) + 1)
@@ -156,7 +163,6 @@ export class SentenceBERTEmbedding {
       vector[freqIndex] += Math.log(freq + 1) * 0.5
     }
 
-    // Normalize vector
     const magnitude = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0))
     if (magnitude > 0) {
       for (let i = 0; i < vector.length; i++) {
@@ -189,16 +195,16 @@ export class SentenceBERTEmbedding {
 
 export class VectorDatabase {
   private vectors: Map<number, number[]> = new Map()
-  private documents: Map<number, any> = new Map()
+  private documents: Map<number, Record<string, any>> = new Map()
   private embedding: SentenceBERTEmbedding
 
   constructor() {
     this.embedding = new SentenceBERTEmbedding()
   }
 
-  indexDocuments(documents: any[]): void {
+  indexDocuments(documents: Array<Record<string, any>>): void {
     documents.forEach((doc) => {
-      const combinedText = `${doc.arab} ${doc.latin} ${doc.terjemahan} ${doc.tafsir}`
+      const combinedText = `${doc.arab || ""} ${doc.latin || ""} ${doc.terjemahan || ""} ${doc.tafsir || ""}`
       const vector = this.embedding.generateEmbedding(combinedText)
 
       this.vectors.set(doc.id, vector)
@@ -206,7 +212,7 @@ export class VectorDatabase {
     })
   }
 
-  semanticSearch(query: string, topK = 10): Array<{ item: any; score: number }> {
+  semanticSearch(query: string, topK = 10): Array<{ item: Record<string, any>; score: number }> {
     const queryVector = this.embedding.generateEmbedding(query)
     const results: Array<{ id: number; score: number }> = []
 
@@ -219,7 +225,7 @@ export class VectorDatabase {
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
       .map((result) => ({
-        item: this.documents.get(result.id),
+        item: this.documents.get(result.id)!,
         score: result.score,
       }))
   }
@@ -234,11 +240,17 @@ export class HybridSearchEngine {
   private bm25: BM25Search
   private vectorDb: VectorDatabase
   private config: HybridSearchConfig
-  private documents: any[]
+  private documents: Array<Record<string, any>>
 
-  constructor(documents: any[], config: Partial<HybridSearchConfig> = {}) {
+  constructor(documents: Array<Record<string, any>>, config: Partial<HybridSearchConfig> = {}) {
     this.documents = documents
-    this.config = { ...DEFAULT_HYBRID_CONFIG, ...config }
+    this.config = {
+      bm25Weight: 0.7,
+      semanticWeight: 0.3,
+      minBM25Threshold: 0.3,
+      minSemanticThreshold: 0.4,
+      ...config,
+    }
     this.bm25 = new BM25Search(documents)
     this.vectorDb = new VectorDatabase()
     this.vectorDb.indexDocuments(documents)
@@ -247,11 +259,9 @@ export class HybridSearchEngine {
   search(query: string, topK = 20): SearchResult[] {
     console.log("[v0] Searching for:", query)
 
-    // Get BM25 results
     const bm25Results = this.bm25.search(query)
     const bm25Map = new Map(bm25Results.map((r) => [r.item.id, r.score]))
 
-    // Get semantic results
     const semanticResults = this.vectorDb.semanticSearch(query, topK * 2)
     const semanticMap = new Map(semanticResults.map((r) => [r.item.id, r.score]))
 
@@ -267,24 +277,26 @@ export class HybridSearchEngine {
       }
 
       let hybridScore = 0
-      if (bm25Score > 0 && semanticScore > 0) {
-        hybridScore = bm25Score * this.config.bm25Weight + semanticScore * this.config.semanticWeight
-      } else if (bm25Score > 0) {
-        // If only BM25 match, boost it slightly
+      if (bm25Score >= this.config.minBM25Threshold) {
         hybridScore = bm25Score * 0.9
-      } else if (semanticScore > 0) {
-        // If only semantic match, boost it slightly
-        hybridScore = semanticScore * 0.95
+      } else if (semanticScore >= this.config.minSemanticThreshold) {
+        hybridScore = semanticScore * 0.5
       }
 
+      if (hybridScore < 0.3) return
+
       const document = this.documents.find((d) => d.id === id)
-      if (document) {
+      if (document && 'id' in document && 'arab' in document && 'latin' in document && 'terjemahan' in document && 'tafsir' in document) {
         hybridResults.push({
-          ...document,
+          id: document.id,
+          arab: document.arab,
+          latin: document.latin,
+          terjemahan: document.terjemahan,
+          tafsir: document.tafsir,
           bm25Score,
           semanticScore,
           hybridScore,
-          matchType: bm25Score > 0 && semanticScore > 0 ? "both" : bm25Score > 0 ? "keyword" : "semantic",
+          matchType: bm25Score >= this.config.minBM25Threshold ? "keyword" : "semantic",
         })
       }
     })
