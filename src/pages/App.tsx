@@ -14,6 +14,7 @@ import UnifiedSearchBar from "@/components/UnifiedSearchBar"
 import SearchResultsModal from "@/components/SearchResultsModal"
 import { Button } from "@/components/ui/button"
 import { Home, ChevronLeft } from "lucide-react"
+import { parseSurahAndAyat } from "@/utils/surah-parser"
 
 interface SearchResult {
   ayat: any
@@ -79,6 +80,40 @@ export default function App() {
     if (!term.trim()) {
       alert("Masukkan kata kunci pencarian")
       return
+    }
+
+    const parsedResult = parseSurahAndAyat(term)
+
+    if (parsedResult) {
+      const { surahNumber, ayatNumber } = parsedResult
+
+      if (surahNumber < 1 || surahNumber > 114) {
+        alert("❌ Nomor Surah harus antara 1-114")
+        return
+      }
+
+      if (ayatNumber < 1 || ayatNumber > 286) {
+        alert("❌ Nomor Ayat harus antara 1-286")
+        return
+      }
+
+      if (tafsirData && surahNumber === tafsirData.number) {
+        const verse = tafsirData.verses.find((v) => v.id === ayatNumber)
+        if (verse) {
+          setCurrentAyat(ayatNumber)
+          setSearchText(term)
+          alert(`✅ Ditemukan: Surah ${tafsirData.name.short} Ayat ${ayatNumber}`)
+          return
+        } else {
+          alert(`❌ Ayat ${ayatNumber} tidak ditemukan di Surah ${tafsirData.name.short}`)
+          return
+        }
+      } else {
+        alert(`📖 Membuka Surah ${surahNumber}, Ayat ${ayatNumber}...`)
+        navigate(`/surah/${surahNumber}`)
+        sessionStorage.setItem("targetAyat", ayatNumber.toString())
+        return
+      }
     }
 
     const verseNumberMatch = term.match(/^(\d+)[:\s]+(\d+)$/)
