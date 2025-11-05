@@ -1,17 +1,23 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import { useNavigate } from "react-router-dom"
 import { fetchSurahList, type SurahListItem } from "@/services/QuranAPI"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { Search, BookOpen, Sparkles } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Search, BookOpen, Sparkles, Mic, MicOff, Loader2 } from "lucide-react"
+import { parseSurahAndAyat } from "@/utils/surah-parser"
 
 export default function SurahList() {
   const [surahList, setSurahList] = useState<SurahListItem[]>([])
   const [filteredList, setFilteredList] = useState<SurahListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState("")
+  const [isListening, setIsListening] = useState(false)
+  const [isSearching, setIsSearching] = useState(false)
+  const [detectedMode, setDetectedMode] = useState<string>("")
+  const recognitionRef = useRef<any>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -44,6 +50,204 @@ export default function SurahList() {
       setFilteredList(filtered)
     }
   }, [searchTerm, surahList])
+
+  const detectInputType = (text: string): boolean => {
+    const wordCount = text.trim().split(/\s+/).length
+    const hasArabicDiacritics = /[\u064B-\u065F]/.test(text)
+    const hasLongPhrase = wordCount > 5
+    const hasArabicText = /[\u0600-\u06FF]/.test(text)
+
+    return (hasLongPhrase && hasArabicText) || hasArabicDiacritics
+  }
+
+  const stopRecognition = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop()
+      } catch (e) {
+        console.log("Recognition already stopped")
+      }
+      recognitionRef.current = null
+    }
+    setIsListening(false)
+    setDetectedMode("")
+  }
+
+  const performSearch = async (term: string) => {
+    if (!term.trim()) {
+      return
+    }
+
+    setIsSearching(true)
+
+    try {
+      const parsedResult = parseSurahAndAyat(term)
+
+      if (parsedResult) {
+        const { surahNumber, ayatNumber } = parsedResult
+
+        if (surahNumber < 1 || surahNumber > 114) {
+          alert("❌ Nomor Surah harus antara 1-114")
+          setIsSearching(false)
+          return
+        }
+
+        if (ayatNumber < 1 || ayatNumber > 286) {
+          alert("❌ Nomor Ayat harus antara 1-286")
+          setIsSearching(false)
+          return
+        }
+
+        sessionStorage.setItem("targetAyat", ayatNumber.toString())
+        navigate(`/surah/${surahNumber}`)
+        setSearchTerm("")
+        setIsSearching(false)
+        return
+      }
+
+      const verseNumberMatch = term.match(/^(\d+)[:\s]+(\d+)$/)
+      const singleVerseMatch = term.match(/^(\d+)$/)
+
+      if (verseNumberMatch) {
+        const surahNum = Number.parseInt(verseNumberMatch[1])
+        const ayatNum = Number.parseInt(verseNumberMatch[2])
+
+        if (surahNum < 1 || surahNum > 114) {
+          alert("❌ Nomor Surah harus antara 1-114")
+          setIsSearching(false)
+          return
+        }
+
+        if (ayatNum < 1 || ayatNum > 286) {
+          alert("❌ Nomor Ayat harus antara 1-286")
+          setIsSearching(false)
+          return
+        }
+
+        sessionStorage.setItem("targetAyat", ayatNum.toString())
+        navigate(`/surah/${surahNum}`)
+        setSearchTerm("")
+        setIsSearching(false)
+        return
+      }
+
+      if (singleVerseMatch) {
+        const ayatNum = Number.parseInt(singleVerseMatch[1])
+
+        if (ayatNum < 1 || ayatNum > 286) {
+          alert("❌ Nomor Ayat harus antara 1-286")
+          setIsSearching(false)
+          return
+        }
+
+        sessionStorage.setItem("targetAyat", ayatNum.toString())
+        navigate(`/surah/1`)
+        setSearchTerm("")
+        setIsSearching(false)
+        return
+      }
+
+      sessionStorage.setItem("globalSearchTerm", term)
+      navigate(`/surah/1`)
+      setSearchTerm("")
+    } catch (error) {
+      console.error("Search error:", error)
+      alert("❌ Terjadi kesalahan saat mencari")
+    } finally {
+      setIsSearching(false)
+    }
+  }
+
+  const startVoiceRecognition = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+
+    if (!SpeechRecognition) {
+      alert("❌ Browser Anda tidak mendukung Speech Recognition.\nCoba gunakan Chrome/Edge.")
+      return
+    }
+
+    stopRecognition()
+
+    setIsListening(true)
+    setDetectedMode("🎤 Mendengarkan...")
+
+    const recognition = new SpeechRecognition()
+    recognitionRef.current = recognition
+
+    recognition.continuous = false
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+    recognition.lang = "ar-SA"
+
+    let hasResult = false
+
+    recognition.onstart = () => {
+      console.log("✅ Speech recognition started with Arabic")
+      setDetectedMode("🎤 Sedang mendengarkan dalam bahasa Arab...")
+    }
+
+    recognition.onresult = (event: any) => {
+      hasResult = true
+      const transcript = event.results[0][0].transcript
+
+      console.log(`🎧 Hasil: "${transcript}"`)
+      setSearchTerm(transcript)
+
+      const isRecitation = detectInputType(transcript)
+
+      if (isRecitation) {
+        setDetectedMode("🎵 Terdeteksi: Lantunan Ayat")
+      } else {
+        setDetectedMode("🔍 Terdeteksi: Kata Kunci")
+      }
+
+      setTimeout(() => {
+        performSearch(transcript)
+        setDetectedMode("")
+        setIsListening(false)
+      }, 1000)
+    }
+
+    recognition.onerror = (event: any) => {
+      console.error("❌ Speech recognition error:", event.error)
+      alert("❌ Pencarian suara gagal. Coba lagi.")
+      stopRecognition()
+    }
+
+    recognition.onend = () => {
+      console.log("🛑 Speech recognition ended")
+      setIsListening(false)
+    }
+
+    try {
+      recognition.start()
+    } catch (e) {
+      console.error("Failed to start recognition:", e)
+      alert("❌ Gagal memulai speech recognition.")
+      stopRecognition()
+    }
+  }
+
+  const handleVoiceClick = () => {
+    if (isListening) {
+      stopRecognition()
+      return
+    }
+
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices
+        .getUserMedia({ audio: true })
+        .then(() => {
+          startVoiceRecognition()
+        })
+        .catch((err) => {
+          console.error("Microphone access denied:", err)
+          alert("❌ Akses mikrofon ditolak.")
+        })
+    } else {
+      startVoiceRecognition()
+    }
+  }
 
   if (loading) {
     return (
@@ -78,19 +282,71 @@ export default function SurahList() {
         </header>
 
         <div className="mb-12 max-w-2xl mx-auto">
-          <div className="relative group">
-            <div className="absolute inset-0 bg-gradient-to-r from-primary/20 to-accent/20 rounded-lg blur opacity-0 group-hover:opacity-100 transition duration-300"></div>
-            <div className="relative bg-card rounded-lg border border-border p-1">
-              <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
-              <Input
-                type="text"
-                placeholder="Cari surah berdasarkan nama atau nomor..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-12 py-3 bg-transparent border-0 text-base focus:outline-none focus:ring-0"
-              />
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              performSearch(searchTerm)
+            }}
+            className="space-y-3"
+          >
+            <div className="relative group">
+              <div className="absolute inset-0 bg-gradient-to-r from-primary/20 to-accent/20 rounded-lg blur opacity-0 group-hover:opacity-100 transition duration-300"></div>
+              <div className="relative bg-card rounded-lg border border-border p-1 flex gap-2">
+                <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5 pointer-events-none" />
+                <Input
+                  type="text"
+                  placeholder="Cari ayat, surah, arti, tafsir (misal: Al-fatihah:7, 2:255, atau kata kunci)..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="pl-12 py-3 bg-transparent border-0 text-base focus:outline-none focus:ring-0 flex-1"
+                  dir="auto"
+                  disabled={isSearching}
+                />
+                <Button
+                  type="button"
+                  variant={isListening ? "destructive" : "outline"}
+                  onClick={handleVoiceClick}
+                  className="px-3"
+                  disabled={isSearching}
+                  title="Klik untuk mulai berbicara"
+                >
+                  {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                </Button>
+                <Button type="submit" variant="secondary" disabled={isSearching} className="px-4">
+                  {isSearching ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Mencari...
+                    </>
+                  ) : (
+                    <>
+                      <Search className="h-4 w-4 mr-2" />
+                      Cari
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
-          </div>
+
+            {isListening && (
+              <div className="text-center space-y-2 animate-in fade-in slide-in-from-top-2 bg-primary/10 p-4 rounded-lg border-2 border-primary">
+                <div className="flex items-center justify-center gap-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                  <p className="text-sm text-primary font-medium">{detectedMode}</p>
+                </div>
+                <p className="text-xs text-muted-foreground">Ucapkan dalam bahasa Arab atau bacakan ayat Al-Qur'an</p>
+                <Button variant="outline" size="sm" onClick={stopRecognition} className="mt-2 bg-transparent">
+                  Batal
+                </Button>
+              </div>
+            )}
+
+            {detectedMode && !isListening && (
+              <div className="text-center animate-in fade-in bg-green-500/10 p-3 rounded-md border border-green-500/20">
+                <p className="text-sm text-green-600 dark:text-green-400 font-medium">{detectedMode}</p>
+              </div>
+            )}
+          </form>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
@@ -146,7 +402,9 @@ export default function SurahList() {
         <footer className="text-center pt-12 border-t border-border/50">
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-primary/5 rounded-full mb-4">
             <Sparkles className="h-4 w-4 text-primary" />
-            <p className="text-sm text-muted-foreground">Klik surah untuk membaca ayat, tafsir, dan pencarian suara</p>
+            <p className="text-sm text-muted-foreground">
+              Gunakan pencarian di atas untuk mencari ayat, surah, tafsir, dan arti di seluruh Al-Qur'an
+            </p>
           </div>
         </footer>
       </div>

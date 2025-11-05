@@ -1,10 +1,9 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { useParams, useNavigate } from "react-router-dom"
-import Fuse from "fuse.js"
 import { fetchSurah, type SurahData } from "@/services/QuranAPI"
-import { HybridSearchEngine } from "@/services/hybrid-search"
+import { SearchManager, type FormattedSearchResult } from "@/services/search-manager"
 import Header from "@/components/header"
 import NavigationButtons from "@/components/NavigationButtons"
 import AyatCard from "@/components/AyatCard"
@@ -14,16 +13,6 @@ import UnifiedSearchBar from "@/components/UnifiedSearchBar"
 import SearchResultsModal from "@/components/SearchResultsModal"
 import { Button } from "@/components/ui/button"
 import { Home, ChevronLeft } from "lucide-react"
-import { parseSurahAndAyat } from "@/utils/surah-parser"
-
-interface SearchResult {
-  ayat: any
-  surahNumber: number
-  surahName: string
-  matchCount: number
-  matchType: "arab" | "latin" | "terjemahan" | "tafsir"
-  searchLanguage: "arab" | "indonesia"
-}
 
 export default function App() {
   const { surahNumber } = useParams<{ surahNumber: string }>()
@@ -34,10 +23,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [searchText, setSearchText] = useState<string>("")
   const [recognitionAvailable, setRecognitionAvailable] = useState(false)
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [searchResults, setSearchResults] = useState<FormattedSearchResult[]>([])
   const [showSearchResults, setShowSearchResults] = useState(false)
-  const [allSurahData, setAllSurahData] = useState<Map<number, SurahData>>(new Map())
-  const [hybridSearchEngine, setHybridSearchEngine] = useState<HybridSearchEngine | null>(null)
+  const [isSearching, setIsSearching] = useState(false)
+
+  const searchManager = useMemo(() => SearchManager.getInstance(), [])
 
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -49,15 +39,17 @@ export default function App() {
       setLoading(true)
       setError(null)
       try {
-        const num = surahNumber ? Number.parseInt(surahNumber) : 67
+        const num = surahNumber ? Number.parseInt(surahNumber) : 1
         const data = await fetchSurah(num)
         setTafsirData(data)
 
-        const hybridEngine = new HybridSearchEngine(data.verses)
-        setHybridSearchEngine(hybridEngine)
-
+        const globalSearchTerm = sessionStorage.getItem("globalSearchTerm")
         const targetAyat = sessionStorage.getItem("targetAyat")
-        if (targetAyat) {
+
+        if (globalSearchTerm) {
+          await performGlobalSearch(globalSearchTerm)
+          sessionStorage.removeItem("globalSearchTerm")
+        } else if (targetAyat) {
           const ayatNum = Number.parseInt(targetAyat)
           if (ayatNum >= 1 && ayatNum <= data.verses.length) {
             setCurrentAyat(ayatNum)
@@ -76,271 +68,67 @@ export default function App() {
     loadData()
   }, [surahNumber])
 
-  const performGlobalSearch = async (term: string) => {
-    if (!term.trim()) {
-      alert("Masukkan kata kunci pencarian")
-      return
-    }
-
-    const parsedResult = parseSurahAndAyat(term)
-
-    if (parsedResult) {
-      const { surahNumber, ayatNumber } = parsedResult
-
-      if (surahNumber < 1 || surahNumber > 114) {
-        alert("❌ Nomor Surah harus antara 1-114")
+  const performGlobalSearch = useCallback(
+    async (term: string) => {
+      if (!term.trim()) {
+        alert("Masukkan kata kunci pencarian")
         return
       }
 
-      if (ayatNumber < 1 || ayatNumber > 286) {
-        alert("❌ Nomor Ayat harus antara 1-286")
-        return
-      }
-
-      if (tafsirData && surahNumber === tafsirData.number) {
-        const verse = tafsirData.verses.find((v) => v.id === ayatNumber)
-        if (verse) {
-          setCurrentAyat(ayatNumber)
-          setSearchText(term)
-          alert(`✅ Ditemukan: Surah ${tafsirData.name.short} Ayat ${ayatNumber}`)
-          return
-        } else {
-          alert(`❌ Ayat ${ayatNumber} tidak ditemukan di Surah ${tafsirData.name.short}`)
-          return
-        }
-      } else {
-        alert(`📖 Membuka Surah ${surahNumber}, Ayat ${ayatNumber}...`)
-        navigate(`/surah/${surahNumber}`)
-        sessionStorage.setItem("targetAyat", ayatNumber.toString())
-        return
-      }
-    }
-
-    const verseNumberMatch = term.match(/^(\d+)[:\s]+(\d+)$/)
-    const singleVerseMatch = term.match(/^(\d+)$/)
-
-    if (verseNumberMatch) {
-      const surahNum = Number.parseInt(verseNumberMatch[1])
-      const ayatNum = Number.parseInt(verseNumberMatch[2])
-
-      if (surahNum < 1 || surahNum > 114) {
-        alert("❌ Nomor Surah harus antara 1-114")
-        return
-      }
-
-      if (ayatNum < 1 || ayatNum > 286) {
-        alert("❌ Nomor Ayat harus antara 1-286")
-        return
-      }
-
-      if (tafsirData && surahNum === tafsirData.number) {
-        const verse = tafsirData.verses.find((v) => v.id === ayatNum)
-        if (verse) {
-          setCurrentAyat(ayatNum)
-          setSearchText(term)
-          alert(`✅ Ditemukan: Surah ${tafsirData.name.short} Ayat ${ayatNum}`)
-          return
-        } else {
-          alert(`❌ Ayat ${ayatNum} tidak ditemukan di Surah ${tafsirData.name.short}`)
-          return
-        }
-      } else {
-        alert(`📖 Membuka Surah ${surahNum}, Ayat ${ayatNum}...`)
-        navigate(`/surah/${surahNum}`)
-        sessionStorage.setItem("targetAyat", ayatNum.toString())
-        return
-      }
-    }
-
-    if (singleVerseMatch && tafsirData) {
-      const ayatNum = Number.parseInt(singleVerseMatch[1])
-
-      if (ayatNum < 1 || ayatNum > 286) {
-        alert("❌ Nomor Ayat harus antara 1-286")
-        return
-      }
-
-      const verse = tafsirData.verses.find((v) => v.id === ayatNum)
-      if (verse) {
-        setCurrentAyat(ayatNum)
+      setIsSearching(true)
+      try {
+        const results = await searchManager.searchGlobal(term)
+        setSearchResults(results)
+        setShowSearchResults(true)
         setSearchText(term)
-        alert(`✅ Ditemukan: Surah ${tafsirData.name.short} Ayat ${ayatNum}`)
-        return
-      } else {
-        alert(
-          `❌ Ayat ${ayatNum} tidak ditemukan di Surah ${tafsirData.name.short}. Surah ini hanya memiliki ${tafsirData.verses.length} ayat.`,
-        )
+
+        if (results.length === 0) {
+          alert("Tidak ada hasil yang ditemukan di seluruh Al-Qur'an")
+        }
+      } catch (error) {
+        console.error("Global search error:", error)
+        alert("❌ Terjadi kesalahan saat mencari")
+      } finally {
+        setIsSearching(false)
+      }
+    },
+    [searchManager],
+  )
+
+  const performSearch = useCallback(
+    async (term: string) => {
+      if (!tafsirData || !term.trim()) {
+        alert("Masukkan kata kunci pencarian")
         return
       }
-    }
 
-    const hasArabic = /[\u0600-\u06FF]/.test(term)
-    let cleanTerm: string
+      setIsSearching(true)
+      try {
+        const results = await searchManager.searchLocal(term, tafsirData)
+        setSearchResults(results)
+        setShowSearchResults(true)
+        setSearchText(term)
 
-    if (hasArabic) {
-      cleanTerm = term.trim().normalize("NFKC")
-    } else {
-      cleanTerm = term
-        .toLowerCase()
-        .trim()
-        .replace(/[^\p{L}\p{N}\s]/gu, "")
-        .normalize("NFKC")
-    }
-
-    const results: SearchResult[] = []
-
-    if (tafsirData && hybridSearchEngine) {
-      console.log("[v0] Using hybrid search engine for query:", cleanTerm)
-      const hybridResults = hybridSearchEngine.search(cleanTerm, 50)
-
-      hybridResults.forEach((result) => {
-        if (result.hybridScore >= 0.4) {
-          results.push({
-            ayat: result,
-            surahNumber: tafsirData.number,
-            surahName: tafsirData.name.short,
-            matchCount: 1,
-            matchType: "arab",
-            searchLanguage: hasArabic ? "arab" : "indonesia",
-          })
+        if (results.length === 0) {
+          alert(`Tidak ada hasil yang ditemukan di Surah ${tafsirData.name.short}`)
         }
-      })
-    }
-
-    if (results.length === 0 && tafsirData) {
-      console.log("[v0] Hybrid search returned no results, trying Fuse.js fallback")
-      const fuseOptions = hasArabic
-        ? {
-            keys: [{ name: "arab", weight: 2 }, "latin", "terjemahan"],
-            threshold: 0.25,
-            includeScore: true,
-            ignoreLocation: true,
-            minMatchCharLength: 2,
-          }
-        : {
-            keys: ["terjemahan", "latin", "tafsir"],
-            threshold: 0.3,
-            includeScore: true,
-            ignoreLocation: true,
-            minMatchCharLength: 2,
-          }
-
-      const fuse = new Fuse(tafsirData.verses, fuseOptions)
-      const fuseResults = fuse.search(cleanTerm)
-
-      fuseResults.forEach((result) => {
-        const score = result.score || 1
-        if (score <= 0.3) {
-          const matchCount = countMatches(result.item, cleanTerm, hasArabic)
-          if (matchCount > 0) {
-            results.push({
-              ayat: result.item,
-              surahNumber: tafsirData.number,
-              surahName: tafsirData.name.short,
-              matchCount,
-              matchType: "arab",
-              searchLanguage: hasArabic ? "arab" : "indonesia",
-            })
-          }
-        }
-      })
-    }
-
-    if (results.length === 0 && tafsirData) {
-      console.log("[v0] Fuse search returned no results, trying substring fallback")
-      tafsirData.verses.forEach((ayat) => {
-        let found = false
-        let matchCount = 0
-
-        if (hasArabic) {
-          const arabicNormalized = ayat.arab.normalize("NFKC")
-          const termNormalized = cleanTerm.normalize("NFKC")
-
-          const arabicClean = arabicNormalized.replace(/[\u064B-\u065F]/g, "")
-          const termClean = termNormalized.replace(/[\u064B-\u065F]/g, "")
-
-          if (termClean.length >= 3 && arabicClean.includes(termClean)) {
-            found = true
-            const regex = new RegExp(termClean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")
-            const matches = arabicClean.match(regex)
-            matchCount = matches ? matches.length : 1
-          }
-        } else {
-          const text = (ayat.terjemahan + " " + ayat.latin + " " + (ayat.tafsir || "")).toLowerCase()
-          const regex = new RegExp(`\\b${cleanTerm.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g")
-          const matches = text.match(regex)
-          if (matches) {
-            found = true
-            matchCount = matches.length
-          }
-        }
-
-        if (found && matchCount > 0) {
-          results.push({
-            ayat,
-            surahNumber: tafsirData.number,
-            surahName: tafsirData.name.short,
-            matchCount,
-            matchType: "arab",
-            searchLanguage: hasArabic ? "arab" : "indonesia",
-          })
-        }
-      })
-    }
-
-    results.sort((a, b) => b.matchCount - a.matchCount)
-
-    setSearchResults(results)
-    setShowSearchResults(true)
-
-    if (results.length === 0) {
-      alert("Tidak ada hasil yang ditemukan")
-    }
-  }
-
-  const countMatches = (ayat: any, searchTerm: string, hasArabic: boolean): number => {
-    let count = 0
-    const fields = hasArabic ? ["arab"] : ["terjemahan", "latin", "tafsir"]
-
-    fields.forEach((field) => {
-      const text = ayat[field] || ""
-      const regex = hasArabic ? new RegExp(searchTerm, "g") : new RegExp(`\\b${searchTerm.toLowerCase()}\\b`, "gi")
-      const matches = text.match(regex)
-      count += matches ? matches.length : 0
-    })
-
-    return count
-  }
-
-  const performSearch = (term: string, isRecitation = false) => {
-    if (!tafsirData || !term.trim()) {
-      alert("Masukkan kata kunci pencarian")
-      return
-    }
-
-    const hasArabic = /[\u0600-\u06FF]/.test(term)
-
-    let cleanTerm: string
-    if (hasArabic) {
-      cleanTerm = term.trim().normalize("NFKC")
-    } else {
-      cleanTerm = term
-        .toLowerCase()
-        .trim()
-        .replace(/[^\p{L}\p{N}\s]/gu, "")
-        .normalize("NFKC")
-    }
-
-    console.log("[v0] Performing search for:", cleanTerm, "isRecitation:", isRecitation)
-    performGlobalSearch(term)
-    setSearchText(term)
-  }
+      } catch (error) {
+        console.error("Search error:", error)
+        alert("❌ Terjadi kesalahan saat mencari")
+      } finally {
+        setIsSearching(false)
+      }
+    },
+    [tafsirData, searchManager],
+  )
 
   const handleSelectSearchResult = (surahNum: number, ayatId: number) => {
     if (surahNum !== tafsirData?.number) {
       navigate(`/surah/${surahNum}`)
+      sessionStorage.setItem("targetAyat", ayatId.toString())
+    } else {
+      setCurrentAyat(ayatId)
     }
-    setCurrentAyat(ayatId)
   }
 
   const currentTafsir = tafsirData?.verses.find((ayat) => ayat.id === currentAyat)
